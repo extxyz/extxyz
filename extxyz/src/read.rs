@@ -129,7 +129,7 @@ fn parse_bare_str(inp: &[u8]) -> IResult<&[u8], Value> {
 }
 
 fn parse_quote_str(inp: &[u8]) -> IResult<&[u8], Value> {
-    let parse_inner = map(
+    let parse_inner = map_res(
         many0(alt((
             take_while1(|b| b != b'\\' && b != b'"'),
             map(tag(r#"\""#), |_| b"\"".as_ref()),
@@ -138,22 +138,17 @@ fn parse_quote_str(inp: &[u8]) -> IResult<&[u8], Value> {
         ))),
         |chunks: Vec<&[u8]>| {
             let s = chunks.concat();
-            let s = String::from_utf8(s).unwrap();
-            Value::Str(Text::from(s))
+            String::from_utf8(s).map(|s| Value::Str(Text::from(s)))
         },
     );
 
-    delimited(tag(b"\"".as_ref()), parse_inner, tag(b"\"".as_ref())).parse(inp)
+    let (inp, xx) = delimited(tag(b"\"".as_ref()), parse_inner, tag(b"\"".as_ref())).parse(inp)?;
+    Ok((inp, xx))
 }
 
 fn parse_bare_properties_str(inp: &[u8]) -> IResult<&[u8], Value> {
     let (remain, inp) =
         take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b':').parse(inp)?;
-    // let (linp, s) = recognize(separated_list1(
-    //     tag(b":".as_ref()),
-    //     take_while1(|c: u8| c != b':'),
-    // ))
-    // .parse(inp)?;
     let s = String::from_utf8(inp.to_vec()).map_err(|_| {
         nom::Err::Failure(nom::error::Error::new(inp, nom::error::ErrorKind::Verify))
     })?;
@@ -420,7 +415,7 @@ enum Ty {
     S,
 }
 
-type PropShape<'a> = Vec<(&'a [u8], Ty, u8)>;
+type PropShape<'a> = Vec<(&'a str, Ty, u8)>;
 
 fn parse_properties<'a>(inp: &'a [u8]) -> IResult<&'a [u8], PropShape<'a>> {
     // into triple elements chunk
@@ -460,6 +455,7 @@ fn parse_properties<'a>(inp: &'a [u8]) -> IResult<&'a [u8], PropShape<'a>> {
                 nom::Err::Failure(nom::error::Error::new(inp, nom::error::ErrorKind::Verify))
             })?;
 
+        let id = str::from_utf8(id).unwrap();
         mp.push((id, ty, nc));
     }
     Ok((inp_, mp))
@@ -504,26 +500,33 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
     let prop_shape = kv
         .remove("Properties".as_bytes())
         .unwrap_or(b"species:S:1:pos:R:3");
+
+    let utf8_str = str::from_utf8(prop_shape).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Float))
+    })?;
+    let prop_shape_value = Value::Str(Text::from(utf8_str));
     let (_, prop_shape) = parse_properties(prop_shape)?;
 
     let maybe_latt = kv.remove("Lattice".as_bytes());
 
-    // latt and prop_shape stored separatly from pure_kv
-    let mut pure_kv = HashMap::with_capacity(kv.len());
+    // XXX: latt and prop_shape better to be stored separatly from pure_kv
+    let mut info = Vec::with_capacity(kv.len() + 2);
     for (k, v) in kv {
         let (_, v) = parse_kv_right(v)?;
-        pure_kv.insert(k, v);
+        info.push((String::from_utf8(k.to_vec()).expect("utf8"), v));
     }
 
-    // XXX: latt can be a matrix wrapped inside a pair of double quotes.
-    // if let Some(latt) = maybe_latt {
-    //
-    // }
+    // TODO: latt can be a matrix wrapped inside a pair of double quotes, test it
+    if let Some(latt) = maybe_latt {
+        let (_, latt) = parse_2d_array(latt)?;
+        info.push(("Lattice".to_string(), latt));
+    }
+    info.push(("Properties".to_string(), prop_shape_value));
 
     // TODO: validate natoms and number of rows of the arr
 
-    let mut mhs: HashMap<&[u8], Vec<Value>> = HashMap::with_capacity(prop_shape.len());
-    for i in 0..natoms {
+    let mut mhs: HashMap<&str, Vec<Value>> = HashMap::with_capacity(prop_shape.len());
+    for _i in 0..natoms {
         let (rest, line) = terminated(
             nom::bytes::streaming::take_until(&b"\n"[..]),
             streaming::newline,
@@ -644,11 +647,29 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
     }
     debug_assert!(input.is_empty());
 
-    let mut arr: HashMap<String, Value> = HashMap::with_capacity(prop_shape.len());
+    // TODO: zero-copy
+    let mut arrs: Vec<(String, Value)> = Vec::with_capacity(prop_shape.len());
     for (name, ty, n) in &prop_shape {
         match (ty, n) {
+            (_, 0) => unreachable!(),
+            (Ty::I, 1) => {
+                let vinner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let vinner = vinner
+                    .iter()
+                    .map(|i| {
+                        let Value::Integer(x) = i else { unreachable!() };
+                        *x
+                    })
+                    .collect::<Vec<_>>();
+                let vinner = Value::VecInteger(vinner, natoms as u32);
+                arrs.push((name.to_string(), vinner));
+            }
             (Ty::R, 1) => {
-                let vinner = mhs.get(name).unwrap();
+                let vinner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
                 let vinner = vinner
                     .iter()
                     .map(|i| {
@@ -656,26 +677,123 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
                         *x
                     })
                     .collect::<Vec<_>>();
-                let vinner = Value::VecFloat(vinner, 3);
-                arr.insert(String::from_utf8(name.to_vec()).unwrap(), vinner);
+                let vinner = Value::VecFloat(vinner, natoms as u32);
+                arrs.push((name.to_string(), vinner));
             }
-            _ => todo!(),
+            (Ty::L, 1) => {
+                let vinner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let vinner = vinner
+                    .iter()
+                    .map(|i| {
+                        let Value::Bool(x) = i else { unreachable!() };
+                        *x
+                    })
+                    .collect::<Vec<_>>();
+                let vinner = Value::VecBool(vinner, natoms as u32);
+                arrs.push((name.to_string(), vinner));
+            }
+            (Ty::S, 1) => {
+                let vinner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let vinner = vinner
+                    .iter()
+                    .map(|i| {
+                        let Value::Str(x) = i else { unreachable!() };
+                        // TODO: ?? zero-copy?
+                        x.clone()
+                    })
+                    .collect::<Vec<_>>();
+                let vinner = Value::VecText(vinner, natoms as u32);
+                arrs.push((name.to_string(), vinner));
+            }
+            (Ty::I, nc) => {
+                let minner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let minner = minner
+                    .iter()
+                    .map(|i| {
+                        let Value::VecInteger(vi, nx) = i else {
+                            unreachable!()
+                        };
+                        debug_assert_eq!(*nx, *nc as u32);
+                        vi.clone()
+                    })
+                    .collect::<Vec<_>>();
+                let minner = Value::MatrixInteger(minner, (natoms as u32, *nc as u32));
+                arrs.push((name.to_string(), minner));
+            }
+            (Ty::R, nc) => {
+                let minner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let minner = minner
+                    .iter()
+                    .map(|i| {
+                        let Value::VecFloat(vi, nx) = i else {
+                            unreachable!()
+                        };
+                        debug_assert_eq!(*nx, *nc as u32);
+                        vi.clone()
+                    })
+                    .collect::<Vec<_>>();
+                let minner = Value::MatrixFloat(minner, (natoms as u32, *nc as u32));
+                arrs.push((name.to_string(), minner));
+            }
+            (Ty::L, nc) => {
+                let minner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let minner = minner
+                    .iter()
+                    .map(|i| {
+                        let Value::VecBool(vi, nx) = i else {
+                            unreachable!()
+                        };
+                        debug_assert_eq!(*nx, *nc as u32);
+                        vi.clone()
+                    })
+                    .collect::<Vec<_>>();
+                let minner = Value::MatrixBool(minner, (natoms as u32, *nc as u32));
+                arrs.push((name.to_string(), minner));
+            }
+            (Ty::S, nc) => {
+                let minner = mhs
+                    .get(name)
+                    .expect("key not found from where it must exist");
+                let minner = minner
+                    .iter()
+                    .map(|i| {
+                        let Value::VecText(vi, nx) = i else {
+                            unreachable!()
+                        };
+                        debug_assert_eq!(*nx, *nc as u32);
+                        vi.clone()
+                    })
+                    .collect::<Vec<_>>();
+                let minner = Value::MatrixText(minner, (natoms as u32, *nc as u32));
+                arrs.push((name.to_string(), minner));
+            }
         }
     }
 
-    Ok((
-        input,
-        Frame {
-            natoms: natoms as u32,
-            info: DictHandler(Vec::new()),
-            arrs: DictHandler(Vec::new()),
-        },
-    ))
+    let frame = Frame {
+        natoms: natoms as u32,
+        info: DictHandler(info),
+        arrs: DictHandler(arrs),
+    };
+
+    Ok((input, frame))
 }
 
 #[cfg(test)]
 mod tests {
     use extxyz_types::{Boolean, Integer};
+
+    use crate::write_frame;
 
     use super::*;
 
@@ -683,8 +801,8 @@ mod tests {
     fn test_parse_properties() {
         let expect = b"species:S:1:pos:R:3";
         let (_, prop) = parse_properties(expect).unwrap();
-        // assert_eq!(*prop.get(&("species".as_bytes(), Ty::S)).unwrap(), 1);
-        // assert_eq!(*prop.get(&("pos".as_bytes(), Ty::R)).unwrap(), 3);
+        assert_eq!(prop[0], ("species", Ty::S, 1));
+        assert_eq!(prop[1], ("pos", Ty::R, 3));
 
         // TODO: if size is 0, raise parsing error
     }
@@ -803,6 +921,58 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_info_line_with_array() {
+        let valid_expects: &[&[u8]] = &[
+            b"key1=aa key2=bb Lattice=[[0,0,0],[10,4,4]]",
+            b"key1=aa key2=bb Lattice=[[ 0,0 ,0],[10, 4,4]]",
+            b"key1=aa key2=bb Lattice=[[0,0,0], [10,4,4]]",
+        ];
+        for expect in valid_expects {
+            let (remain, v) = parse_info_line(expect).unwrap();
+            assert!(remain.is_empty());
+            assert_eq!(
+                format!(
+                    "{}={}",
+                    str::from_utf8(v[0].0).unwrap(),
+                    str::from_utf8(v[0].1).unwrap()
+                ),
+                "key1=aa".to_string()
+            );
+            assert_eq!(
+                format!(
+                    "{}={}",
+                    str::from_utf8(v[1].0).unwrap(),
+                    str::from_utf8(v[1].1).unwrap()
+                ),
+                "key2=bb".to_string()
+            );
+            assert_eq!(
+                format!(
+                    "{}={}",
+                    str::from_utf8(v[2].0).unwrap(),
+                    str::from_utf8(v[2].1)
+                        .unwrap()
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                ),
+                "Lattice=[[0,0,0],[10,4,4]]".to_string()
+            );
+        }
+    }
+
+    struct TFrame(Frame);
+
+    impl std::fmt::Display for TFrame {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &self.0).map_err(|_| std::fmt::Error)?;
+            let s = std::str::from_utf8(&buf).map_err(|_| std::fmt::Error)?;
+            f.write_str(s)
+        }
+    }
+
+    #[test]
     fn test_parse_frame_default() {
         let inp = &br#"2
 Properties=species:S:1:pos:R:3 key1=aa
@@ -810,54 +980,10 @@ Mn 0.0 0.5 0.5
 C 0.0 0.5 0.3
 "#[..];
 
-        // TODO:
-        // Properties="species:S:1:pos:R:3" key1=aa
-
         let (_, frame) = parse_frame(inp)
-            .map_err(|err| {
-                err.map_input(|inp| {
-                    // println!("{}", str::from_utf8(inp).unwrap())
-                    str::from_utf8(inp).unwrap()
-                })
-            })
+            .map_err(|err| err.map_input(|inp| str::from_utf8(inp).unwrap()))
             .unwrap();
+        let frame = TFrame(frame);
+        println!("{}", frame);
     }
-
-    // #[test]
-    // fn test_parse_info_line_with_array() {
-    //     let valid_expects: &[&[u8]] = &[
-    //         b"key1=aa key2=bb Lattice=[[0,0,0],[10,4,4]]",
-    //         b"key1=aa key2=bb Lattice=[[ 0,0 ,0],[10, 4,4]]",
-    //         b"key1=aa key2=bb Lattice=[[0,0,0], [10,4,4]]",
-    //     ];
-    //     for expect in valid_expects {
-    //         let (remain, v) = parse_info_line(expect).unwrap();
-    //         assert!(remain.is_empty());
-    //         assert_eq!(
-    //             format!(
-    //                 "{}={}",
-    //                 str::from_utf8(v[0].0).unwrap(),
-    //                 str::from_utf8(v[0].1).unwrap()
-    //             ),
-    //             "key1=aa".to_string()
-    //         );
-    //         assert_eq!(
-    //             format!(
-    //                 "{}={}",
-    //                 str::from_utf8(v[1].0).unwrap(),
-    //                 str::from_utf8(v[1].1).unwrap()
-    //             ),
-    //             "key2=bb".to_string()
-    //         );
-    //         let Value::MatrixInteger(ms, (2, 3)) = v.get("Lattice").unwrap() else {
-    //             panic!("not a 2x3 MatrixInteger")
-    //         };
-    //         assert_eq!(*ms[0][0], 0);
-    //         assert_eq!(*ms[0][1], 0);
-    //         assert_eq!(*ms[0][2], 0);
-    //         assert_eq!(*ms[1][0], 10);
-    //         assert_eq!(*ms[1][1], 4);
-    //         assert_eq!(*ms[1][2], 4);
-    //     }
-    // }
 }

@@ -186,6 +186,7 @@ impl std::fmt::Display for Boolean {
 }
 impl std::fmt::Display for Text {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // XXX: can this be formatted? I remember too many space in info line cause segfault
         write!(f, "{}", escape(&self.0))
     }
 }
