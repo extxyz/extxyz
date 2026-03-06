@@ -354,7 +354,7 @@ C         -7.28250        4.71303       -3.82016
 
         let s = String::from_utf8(buf).unwrap();
         let expect = r#"4
-key1=a key2=a/b key3=a@b key4=a@bProperties=species:S:1:pos:R:3
+key1=a key2=a/b key3=a@b key4=a@b Properties=species:S:1:pos:R:3
 Mg         -4.25650000       3.79180000      -2.54123000
 C          -1.15405000       2.86652000      -1.26699000
 C          -5.53758000       3.70936000       0.63504000

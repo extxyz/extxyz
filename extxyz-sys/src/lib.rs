@@ -332,12 +332,20 @@ where
     }
 
     // own the dict and it will be dropped after use.
-    let (info_val, arrays_val) =
+    let (mut info_val, arrays_val) =
         unsafe { (DictHandler::from_ptr(info), DictHandler::from_ptr(arrays)) };
 
     unsafe {
         bindings::free_dict(info);
         bindings::free_dict(arrays);
+    }
+
+    // The default (fallback) shape is: Properties=species:S:1:pos:R:3
+    if !info_val.0.iter_mut().any(|(k, _)| k == "Properties") {
+        info_val.0.push((
+            "Properties".to_string(),
+            Value::Str(Text::from("species:S:1:pos:R:3")),
+        ));
     }
 
     Ok((nat as u32, info_val, arrays_val))
