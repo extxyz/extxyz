@@ -115,14 +115,24 @@ fn key_value(inp: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
     Ok((inp, (k, v)))
 }
 
-// i32
-fn parse_int(inp: &[u8]) -> IResult<&[u8], Value> {
-    character::complete::i32
-        .map(|i| Value::Integer(i.into()))
-        .parse(inp)
+fn recognize_int(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    recognize(character::complete::i32).parse(inp)
 }
 
-fn parse_float(inp: &[u8]) -> IResult<&[u8], Value> {
+// i32
+fn parse_int(inp: &[u8]) -> IResult<&[u8], Value> {
+    map_res(recognize_int, |bytes: &[u8]| {
+        let s = std::str::from_utf8(bytes)
+            .map_err(|_| nom::error::Error::new(bytes, nom::error::ErrorKind::Char))?;
+        let i = s
+            .parse::<i32>()
+            .map_err(|_| nom::error::Error::new(bytes, nom::error::ErrorKind::Digit))?;
+        Ok::<Value, nom::error::Error<&[u8]>>(Value::Integer(i.into()))
+    })
+    .parse(inp)
+}
+
+fn recognize_float(inp: &[u8]) -> IResult<&[u8], &[u8]> {
     // number::complete::double will parse an integer into a float, this is what I don't want
     // I parse twice here, using recognize_float_parts to get the fraction part and error out if it
     // is a pure integer.
@@ -134,11 +144,17 @@ fn parse_float(inp: &[u8]) -> IResult<&[u8], Value> {
             nom::error::ErrorKind::Float,
         )));
     }
-    let (inp, float) = number::complete::double
+    let len = inp.len() - inp_.len();
+    Ok((inp_, &inp[..len]))
+}
+
+fn parse_float(inp: &[u8]) -> IResult<&[u8], Value> {
+    let (remain, inp) = recognize_float.parse(inp)?;
+    let (_, float) = number::complete::double
         .map(|i| Value::Float(i.into()))
         .parse(inp)?;
 
-    Ok((inp, float))
+    Ok((remain, float))
 }
 
 fn parse_bool(inp: &[u8]) -> IResult<&[u8], Value> {
@@ -156,7 +172,20 @@ fn parse_bool(inp: &[u8]) -> IResult<&[u8], Value> {
     .parse(inp)
 }
 
+fn recognize_bool(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    // XXX: should to v.v
+    recognize(parse_bool).parse(inp)
+}
+
 fn parse_bare_str(inp: &[u8]) -> IResult<&[u8], Value> {
+    let (remain, inp) = recognize_bare_str.parse(inp)?;
+    let s = String::from_utf8(inp.to_vec()).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(inp, nom::error::ErrorKind::Verify))
+    })?;
+    Ok((remain, Value::Str(Text::from(s))))
+}
+
+fn recognize_bare_str(inp: &[u8]) -> IResult<&[u8], &[u8]> {
     let (linp, s) = take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_').parse(inp)?;
     if !s[0].is_ascii_alphabetic() && s[0] != b'_' {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -164,10 +193,8 @@ fn parse_bare_str(inp: &[u8]) -> IResult<&[u8], Value> {
             nom::error::ErrorKind::Verify,
         )));
     }
-    let s = String::from_utf8(s.to_vec()).map_err(|_| {
-        nom::Err::Failure(nom::error::Error::new(inp, nom::error::ErrorKind::Verify))
-    })?;
-    Ok((linp, Value::Str(Text::from(s))))
+    let len = inp.len() - linp.len();
+    Ok((linp, &inp[..len]))
 }
 
 fn parse_quote_str(inp: &[u8]) -> IResult<&[u8], Value> {
@@ -703,7 +730,12 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
             multispace0,
             separated_list1(
                 space1,
-                alt((parse_bare_str, parse_float, parse_int, parse_bool)),
+                alt((
+                    recognize_bare_str,
+                    recognize_float,
+                    recognize_int,
+                    recognize_bool,
+                )),
             ),
             multispace0,
         )
@@ -714,30 +746,38 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
             match (ty, n, arr) {
                 (_, 0, _) => unreachable!(),
                 (Ty::I, 1, Value::VecInteger(v, _)) => {
-                    let Value::Integer(x) = std::mem::take(&mut vs_raw[loc]) else {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
                         unreachable!()
                     };
+                    let (_, x) = parse_int(x).expect("parse int");
+                    let Value::Integer(x) = x else { unreachable!() };
                     v.push(x);
                     loc += 1;
                 }
                 (Ty::R, 1, Value::VecFloat(v, _)) => {
-                    let Value::Float(x) = std::mem::take(&mut vs_raw[loc]) else {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
                         unreachable!()
                     };
+                    let (_, x) = parse_float(x).expect("parse float");
+                    let Value::Float(x) = x else { unreachable!() };
                     v.push(x);
                     loc += 1;
                 }
                 (Ty::L, 1, Value::VecBool(v, _)) => {
-                    let Value::Bool(x) = std::mem::take(&mut vs_raw[loc]) else {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
                         unreachable!()
                     };
+                    let (_, x) = parse_bool(x).expect("parse bool");
+                    let Value::Bool(x) = x else { unreachable!() };
                     v.push(x);
                     loc += 1;
                 }
                 (Ty::S, 1, Value::VecText(v, _)) => {
-                    let Value::Str(x) = std::mem::take(&mut vs_raw[loc]) else {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
                         unreachable!()
                     };
+                    let (_, x) = parse_bare_str(x).expect("parse str");
+                    let Value::Str(x) = x else { unreachable!() };
                     v.push(x);
                     loc += 1;
                 }
@@ -745,8 +785,9 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
                     let vv = vs_raw[loc..(loc + *nc as usize)]
                         .iter()
                         .map(|x| {
+                            let (_, x) = parse_int(x).expect("parse float");
                             let Value::Integer(x) = x else { unreachable!() };
-                            *x
+                            x
                         })
                         .collect::<Vec<_>>();
                     m.push(vv);
@@ -756,8 +797,9 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
                     let vv = vs_raw[loc..(loc + *nc as usize)]
                         .iter()
                         .map(|x| {
+                            let (_, x) = parse_float(x).expect("parse float");
                             let Value::Float(x) = x else { unreachable!() };
-                            *x
+                            x
                         })
                         .collect::<Vec<_>>();
                     m.push(vv);
@@ -767,8 +809,9 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
                     let vv = vs_raw[loc..(loc + *nc as usize)]
                         .iter()
                         .map(|x| {
+                            let (_, x) = parse_bool(x).expect("parse float");
                             let Value::Bool(x) = x else { unreachable!() };
-                            *x
+                            x
                         })
                         .collect::<Vec<_>>();
                     m.push(vv);
@@ -776,9 +819,10 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
                 }
                 (Ty::S, nc, Value::MatrixText(m, _)) => {
                     let vv = vs_raw[loc..(loc + *nc as usize)]
-                        .iter_mut()
+                        .iter()
                         .map(|x| {
-                            let Value::Str(x) = std::mem::take(x) else {
+                            let (_, mut x) = parse_bare_str(x).expect("parse float");
+                            let Value::Str(x) = std::mem::take(&mut x) else {
                                 unreachable!()
                             };
                             x
@@ -980,7 +1024,7 @@ mod tests {
 
     #[test]
     fn test_parse_info_line_with_str() {
-        // key_value use recogonize instead of doing further parse no extxyz::Value
+        // key_value use recognize instead of doing further parse no extxyz::Value
         let valid_expects: &[&[u8]] = &[
             br#"key1=aa key2=bb pp=what"#,
             br#"key1=aa key2=bb pp= what"#,
