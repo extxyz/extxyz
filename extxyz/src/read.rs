@@ -17,7 +17,7 @@ use nom::{
     IResult, Parser,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     io::{self, BufRead},
 };
 
@@ -25,34 +25,76 @@ pub(crate) fn _read_frame_native<R>(rd: &mut R, comment_override: Option<&str>) 
 where
     R: BufRead,
 {
-    loop {
-        let buf = rd.fill_buf()?;
-        if buf.is_empty() {
+    // loop {
+    //     let buf = rd.fill_buf()?;
+    //     if buf.is_empty() {
+    //         return Err(io::Error::new(
+    //             io::ErrorKind::UnexpectedEof,
+    //             "EOF reached before parsing frame",
+    //         ));
+    //     }
+    //
+    //     match parse_frame(buf) {
+    //         Ok((remaining, mut frame)) => {
+    //             let amount = buf.len() - remaining.len();
+    //             rd.consume(amount);
+    //             if let Some(comment) = comment_override {
+    //                 frame.set_comment(comment);
+    //             }
+    //
+    //             return Ok(frame);
+    //         }
+    //         Err(nom::Err::Incomplete(_needed)) => {
+    //             let len = buf.len();
+    //             rd.consume(len);
+    //
+    //             continue;
+    //         }
+    //         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+    //     }
+    // }
+    let mut first_line = String::new();
+
+    // read first line → number of lines in this frame
+    rd.read_line(&mut first_line)?;
+    if first_line.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "EOF reached before reading frame size",
+        ));
+    }
+
+    // parse number of lines
+    let num_lines: usize = first_line
+        .trim()
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // read exactly num_lines lines into a buffer
+    let mut buf = String::new();
+    buf.push_str(&first_line);
+
+    let mut line = String::new();
+    for _ in 0..=num_lines {
+        line.clear();
+        let n = rd.read_line(&mut line)?;
+        if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "EOF reached before parsing frame",
+                "EOF reached before reading full frame",
             ));
         }
-
-        match parse_frame(buf) {
-            Ok((remaining, mut frame)) => {
-                let amount = buf.len() - remaining.len();
-                rd.consume(amount);
-                if let Some(comment) = comment_override {
-                    frame.set_comment(comment);
-                }
-
-                return Ok(frame);
-            }
-            Err(nom::Err::Incomplete(_needed)) => {
-                let len = buf.len();
-                rd.consume(len);
-
-                continue;
-            }
-            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
-        }
+        buf.push_str(&line);
     }
+    // dbg!(&buf);
+    parse_frame(buf.as_bytes())
+        .map(|(_remaining, mut frame)| {
+            if let Some(comment) = comment_override {
+                frame.set_comment(comment);
+            }
+            frame
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
 // XXX: can I lru cache this call?
@@ -73,14 +115,24 @@ fn key_value(inp: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
     Ok((inp, (k, v)))
 }
 
-// i32
-fn parse_int(inp: &[u8]) -> IResult<&[u8], Value> {
-    character::complete::i32
-        .map(|i| Value::Integer(i.into()))
-        .parse(inp)
+fn recognize_int(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    recognize(character::complete::i32).parse(inp)
 }
 
-fn parse_float(inp: &[u8]) -> IResult<&[u8], Value> {
+// i32
+fn parse_int(inp: &[u8]) -> IResult<&[u8], Value> {
+    map_res(recognize_int, |bytes: &[u8]| {
+        let s = std::str::from_utf8(bytes)
+            .map_err(|_| nom::error::Error::new(bytes, nom::error::ErrorKind::Char))?;
+        let i = s
+            .parse::<i32>()
+            .map_err(|_| nom::error::Error::new(bytes, nom::error::ErrorKind::Digit))?;
+        Ok::<Value, nom::error::Error<&[u8]>>(Value::Integer(i.into()))
+    })
+    .parse(inp)
+}
+
+fn recognize_float(inp: &[u8]) -> IResult<&[u8], &[u8]> {
     // number::complete::double will parse an integer into a float, this is what I don't want
     // I parse twice here, using recognize_float_parts to get the fraction part and error out if it
     // is a pure integer.
@@ -92,11 +144,17 @@ fn parse_float(inp: &[u8]) -> IResult<&[u8], Value> {
             nom::error::ErrorKind::Float,
         )));
     }
-    let (inp, float) = number::complete::double
+    let len = inp.len() - inp_.len();
+    Ok((inp_, &inp[..len]))
+}
+
+fn parse_float(inp: &[u8]) -> IResult<&[u8], Value> {
+    let (remain, inp) = recognize_float.parse(inp)?;
+    let (_, float) = number::complete::double
         .map(|i| Value::Float(i.into()))
         .parse(inp)?;
 
-    Ok((inp, float))
+    Ok((remain, float))
 }
 
 fn parse_bool(inp: &[u8]) -> IResult<&[u8], Value> {
@@ -114,7 +172,20 @@ fn parse_bool(inp: &[u8]) -> IResult<&[u8], Value> {
     .parse(inp)
 }
 
+fn recognize_bool(inp: &[u8]) -> IResult<&[u8], &[u8]> {
+    // XXX: should to v.v
+    recognize(parse_bool).parse(inp)
+}
+
 fn parse_bare_str(inp: &[u8]) -> IResult<&[u8], Value> {
+    let (remain, inp) = recognize_bare_str.parse(inp)?;
+    let s = String::from_utf8(inp.to_vec()).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(inp, nom::error::ErrorKind::Verify))
+    })?;
+    Ok((remain, Value::Str(Text::from(s))))
+}
+
+fn recognize_bare_str(inp: &[u8]) -> IResult<&[u8], &[u8]> {
     let (linp, s) = take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_').parse(inp)?;
     if !s[0].is_ascii_alphabetic() && s[0] != b'_' {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -122,10 +193,8 @@ fn parse_bare_str(inp: &[u8]) -> IResult<&[u8], Value> {
             nom::error::ErrorKind::Verify,
         )));
     }
-    let s = String::from_utf8(s.to_vec()).map_err(|_| {
-        nom::Err::Failure(nom::error::Error::new(inp, nom::error::ErrorKind::Verify))
-    })?;
-    Ok((linp, Value::Str(Text::from(s))))
+    let len = inp.len() - linp.len();
+    Ok((linp, &inp[..len]))
 }
 
 fn parse_quote_str(inp: &[u8]) -> IResult<&[u8], Value> {
@@ -531,7 +600,9 @@ fn parse_properties<'a>(inp: &'a [u8]) -> IResult<&'a [u8], PropShape<'a>> {
 }
 
 fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
+    // dbg!(str::from_utf8(input).unwrap());
     let (input, _) = streaming::multispace0(input)?;
+    // dbg!(str::from_utf8(input).unwrap());
     let (input, natoms) = map_res(streaming::digit1, |digits: &[u8]| {
         let s = std::str::from_utf8(digits).expect("digit1 expect ASCII");
         s.parse::<usize>()
@@ -545,6 +616,8 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
         streaming::newline,
     )
     .parse(input)?;
+
+    // dbg!(str::from_utf8(line).unwrap());
 
     let (_, info_kv) = alt((
         all_consuming(parse_info_line),
@@ -614,263 +687,155 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
         info.push(("Lattice".to_string(), latt));
     }
     info.push(("Properties".to_string(), prop_shape_value));
+    // dbg!(&info);
 
     // TODO: validate natoms and number of rows of the arr
 
-    let mut mhs: HashMap<&str, Vec<Value>> = HashMap::with_capacity(prop_shape.len());
+    // create the data container first based on the shape
+    let mut arrs: Vec<(String, Value)> = prop_shape
+        .iter()
+        .map(|(name, ty, n)| {
+            let value = match (ty, n) {
+                (Ty::I, 1) => Value::VecInteger(Vec::with_capacity(natoms), natoms as u32),
+                (Ty::R, 1) => Value::VecFloat(Vec::with_capacity(natoms), natoms as u32),
+                (Ty::L, 1) => Value::VecBool(Vec::with_capacity(natoms), natoms as u32),
+                (Ty::S, 1) => Value::VecText(Vec::with_capacity(natoms), natoms as u32),
+
+                (Ty::I, nc) => {
+                    Value::MatrixInteger(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                }
+                (Ty::R, nc) => {
+                    Value::MatrixFloat(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                }
+                (Ty::L, nc) => {
+                    Value::MatrixBool(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                }
+                (Ty::S, nc) => {
+                    Value::MatrixText(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                }
+            };
+
+            (name.to_string(), value)
+        })
+        .collect();
+
     for _i in 0..natoms {
         let (rest, line) = terminated(
             nom::bytes::streaming::take_until(&b"\n"[..]),
-            streaming::newline,
+            opt(streaming::newline),
         )
         .parse(input)?;
+
         let (_, mut vs_raw) = delimited(
             multispace0,
             separated_list1(
                 space1,
-                alt((parse_bare_str, parse_float, parse_int, parse_bool)),
+                alt((
+                    recognize_bare_str,
+                    recognize_float,
+                    recognize_int,
+                    recognize_bool,
+                )),
             ),
             multispace0,
         )
         .parse(line)?;
 
-        let mut loc: u8 = 0;
-        for (name, ty, n) in &prop_shape {
-            if *n == 0 {
-                // TODO: verbose context error
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    rest,
-                    nom::error::ErrorKind::Verify,
-                )));
-            }
-            if *n == 1 {
-                let vv = std::mem::take(&mut vs_raw[loc as usize]);
-                mhs.entry(name).or_default().push(vv);
-                loc += *n;
-            } else {
-                let mut vv: Vec<Value> = Vec::with_capacity(*n as usize);
-                vv.resize_with(*n as usize, Default::default);
-                for i in 0..(*n) {
-                    vv[i as usize] = std::mem::take(&mut vs_raw[(i + loc) as usize]);
+        let mut loc = 0;
+        for ((_, ty, n), (_, ref mut arr)) in prop_shape.iter().zip(arrs.iter_mut()) {
+            match (ty, n, arr) {
+                (_, 0, _) => unreachable!(),
+                (Ty::I, 1, Value::VecInteger(v, _)) => {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
+                        unreachable!()
+                    };
+                    let (_, x) = parse_int(x).expect("parse int");
+                    let Value::Integer(x) = x else { unreachable!() };
+                    v.push(x);
+                    loc += 1;
                 }
-                let vxs = match ty {
-                    Ty::I => {
-                        let vv = vv
-                            .into_iter()
-                            .map(|vv| {
-                                let Value::Integer(inner) = vv else {
-                                    // actual value not consistent with ty in prop_shape
-                                    return Err(nom::Err::Failure(nom::error::Error::new(
-                                        rest,
-                                        nom::error::ErrorKind::Verify,
-                                    )));
-                                };
-                                Ok(inner)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let len = vv.len();
-                        Value::VecInteger(vv, len as u32)
-                    }
-                    Ty::R => {
-                        let vv = vv
-                            .into_iter()
-                            .map(|vv| {
-                                let inner = match vv {
-                                    Value::Integer(int_inner) => {
-                                        FloatNum::from(f64::from(*int_inner))
-                                    }
-                                    Value::Float(inner) => inner,
-                                    _ => {
-                                        // actual value not consistent with ty in prop_shape
-                                        return Err(nom::Err::Failure(nom::error::Error::new(
-                                            rest,
-                                            nom::error::ErrorKind::Verify,
-                                        )));
-                                    }
-                                };
-                                Ok(inner)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let len = vv.len();
-                        Value::VecFloat(vv, len as u32)
-                    }
-                    Ty::L => {
-                        let vv = vv
-                            .into_iter()
-                            .map(|vv| {
-                                let Value::Bool(inner) = vv else {
-                                    // actual value not consistent with ty in prop_shape
-                                    return Err(nom::Err::Failure(nom::error::Error::new(
-                                        rest,
-                                        nom::error::ErrorKind::Verify,
-                                    )));
-                                };
-                                Ok(inner)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let len = vv.len();
-                        Value::VecBool(vv, len as u32)
-                    }
-                    Ty::S => {
-                        let vv = vv
-                            .into_iter()
-                            .map(|vv| {
-                                let Value::Str(inner) = vv else {
-                                    // actual value not consistent with ty in prop_shape
-                                    return Err(nom::Err::Failure(nom::error::Error::new(
-                                        rest,
-                                        nom::error::ErrorKind::Verify,
-                                    )));
-                                };
-                                Ok(inner)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let len = vv.len();
-                        Value::VecText(vv, len as u32)
-                    }
-                };
-                mhs.entry(name).or_default().push(vxs);
-                loc += *n;
+                (Ty::R, 1, Value::VecFloat(v, _)) => {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
+                        unreachable!()
+                    };
+                    let (_, x) = parse_float(x).expect("parse float");
+                    let Value::Float(x) = x else { unreachable!() };
+                    v.push(x);
+                    loc += 1;
+                }
+                (Ty::L, 1, Value::VecBool(v, _)) => {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
+                        unreachable!()
+                    };
+                    let (_, x) = parse_bool(x).expect("parse bool");
+                    let Value::Bool(x) = x else { unreachable!() };
+                    v.push(x);
+                    loc += 1;
+                }
+                (Ty::S, 1, Value::VecText(v, _)) => {
+                    let x = std::mem::take(&mut vs_raw[loc]) else {
+                        unreachable!()
+                    };
+                    let (_, x) = parse_bare_str(x).expect("parse str");
+                    let Value::Str(x) = x else { unreachable!() };
+                    v.push(x);
+                    loc += 1;
+                }
+                (Ty::I, nc, Value::MatrixInteger(m, _)) => {
+                    let vv = vs_raw[loc..(loc + *nc as usize)]
+                        .iter()
+                        .map(|x| {
+                            let (_, x) = parse_int(x).expect("parse float");
+                            let Value::Integer(x) = x else { unreachable!() };
+                            x
+                        })
+                        .collect::<Vec<_>>();
+                    m.push(vv);
+                    loc += *nc as usize;
+                }
+                (Ty::R, nc, Value::MatrixFloat(m, _)) => {
+                    let vv = vs_raw[loc..(loc + *nc as usize)]
+                        .iter()
+                        .map(|x| {
+                            let (_, x) = parse_float(x).expect("parse float");
+                            let Value::Float(x) = x else { unreachable!() };
+                            x
+                        })
+                        .collect::<Vec<_>>();
+                    m.push(vv);
+                    loc += *nc as usize;
+                }
+                (Ty::L, nc, Value::MatrixBool(m, _)) => {
+                    let vv = vs_raw[loc..(loc + *nc as usize)]
+                        .iter()
+                        .map(|x| {
+                            let (_, x) = parse_bool(x).expect("parse float");
+                            let Value::Bool(x) = x else { unreachable!() };
+                            x
+                        })
+                        .collect::<Vec<_>>();
+                    m.push(vv);
+                    loc += *nc as usize;
+                }
+                (Ty::S, nc, Value::MatrixText(m, _)) => {
+                    let vv = vs_raw[loc..(loc + *nc as usize)]
+                        .iter()
+                        .map(|x| {
+                            let (_, mut x) = parse_bare_str(x).expect("parse float");
+                            let Value::Str(x) = std::mem::take(&mut x) else {
+                                unreachable!()
+                            };
+                            x
+                        })
+                        .collect::<Vec<_>>();
+                    m.push(vv);
+                    loc += *nc as usize;
+                }
+                _ => unreachable!(),
             }
         }
 
-        // bring the rest out as remaining input
         input = rest;
-    }
-    let (input, _) = multispace0(input)?;
-    debug_assert!(input.is_empty());
-
-    // TODO: zero-copy
-    let mut arrs: Vec<(String, Value)> = Vec::with_capacity(prop_shape.len());
-    for (name, ty, n) in &prop_shape {
-        match (ty, n) {
-            (_, 0) => unreachable!(),
-            (Ty::I, 1) => {
-                let vinner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let vinner = vinner
-                    .iter()
-                    .map(|i| {
-                        let Value::Integer(x) = i else { unreachable!() };
-                        *x
-                    })
-                    .collect::<Vec<_>>();
-                let vinner = Value::VecInteger(vinner, natoms as u32);
-                arrs.push((name.to_string(), vinner));
-            }
-            (Ty::R, 1) => {
-                let vinner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let vinner = vinner
-                    .iter()
-                    .map(|i| {
-                        let Value::Float(x) = i else { unreachable!() };
-                        *x
-                    })
-                    .collect::<Vec<_>>();
-                let vinner = Value::VecFloat(vinner, natoms as u32);
-                arrs.push((name.to_string(), vinner));
-            }
-            (Ty::L, 1) => {
-                let vinner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let vinner = vinner
-                    .iter()
-                    .map(|i| {
-                        let Value::Bool(x) = i else { unreachable!() };
-                        *x
-                    })
-                    .collect::<Vec<_>>();
-                let vinner = Value::VecBool(vinner, natoms as u32);
-                arrs.push((name.to_string(), vinner));
-            }
-            (Ty::S, 1) => {
-                let vinner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let vinner = vinner
-                    .iter()
-                    .map(|i| {
-                        let Value::Str(x) = i else { unreachable!() };
-                        // TODO: ?? zero-copy?
-                        x.clone()
-                    })
-                    .collect::<Vec<_>>();
-                let vinner = Value::VecText(vinner, natoms as u32);
-                arrs.push((name.to_string(), vinner));
-            }
-            (Ty::I, nc) => {
-                let minner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let minner = minner
-                    .iter()
-                    .map(|i| {
-                        let Value::VecInteger(vi, nx) = i else {
-                            unreachable!()
-                        };
-                        debug_assert_eq!(*nx, *nc as u32);
-                        vi.clone()
-                    })
-                    .collect::<Vec<_>>();
-                let minner = Value::MatrixInteger(minner, (natoms as u32, *nc as u32));
-                arrs.push((name.to_string(), minner));
-            }
-            (Ty::R, nc) => {
-                let minner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let minner = minner
-                    .iter()
-                    .map(|i| {
-                        let Value::VecFloat(vi, nx) = i else {
-                            unreachable!()
-                        };
-                        debug_assert_eq!(*nx, *nc as u32);
-                        vi.clone()
-                    })
-                    .collect::<Vec<_>>();
-                let minner = Value::MatrixFloat(minner, (natoms as u32, *nc as u32));
-                arrs.push((name.to_string(), minner));
-            }
-            (Ty::L, nc) => {
-                let minner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let minner = minner
-                    .iter()
-                    .map(|i| {
-                        let Value::VecBool(vi, nx) = i else {
-                            unreachable!()
-                        };
-                        debug_assert_eq!(*nx, *nc as u32);
-                        vi.clone()
-                    })
-                    .collect::<Vec<_>>();
-                let minner = Value::MatrixBool(minner, (natoms as u32, *nc as u32));
-                arrs.push((name.to_string(), minner));
-            }
-            (Ty::S, nc) => {
-                let minner = mhs
-                    .get(name)
-                    .expect("key not found from where it must exist");
-                let minner = minner
-                    .iter()
-                    .map(|i| {
-                        let Value::VecText(vi, nx) = i else {
-                            unreachable!()
-                        };
-                        debug_assert_eq!(*nx, *nc as u32);
-                        vi.clone()
-                    })
-                    .collect::<Vec<_>>();
-                let minner = Value::MatrixText(minner, (natoms as u32, *nc as u32));
-                arrs.push((name.to_string(), minner));
-            }
-        }
     }
 
     let frame = Frame {
@@ -878,6 +843,9 @@ fn parse_frame(input: &[u8]) -> IResult<&[u8], Frame> {
         info: DictHandler(info),
         arrs: DictHandler(arrs),
     };
+
+    let (input, _) = multispace0(input)?;
+    debug_assert!(input.is_empty());
 
     Ok((input, frame))
 }
@@ -1056,7 +1024,7 @@ mod tests {
 
     #[test]
     fn test_parse_info_line_with_str() {
-        // key_value use recogonize instead of doing further parse no extxyz::Value
+        // key_value use recognize instead of doing further parse no extxyz::Value
         let valid_expects: &[&[u8]] = &[
             br#"key1=aa key2=bb pp=what"#,
             br#"key1=aa key2=bb pp= what"#,
