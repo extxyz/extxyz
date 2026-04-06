@@ -29,6 +29,32 @@ You should use `extxyz/extxyz-ng` if you want
 - use it as a rust dependency.
 - streaming on read/write without blowup you RAM for trajactories of large structure.
 
+## Performance benchmark
+
+Compare with the legacy c implementation in `libAtoms/extxyz`, the rust implementation is nearly twice faster.
+The benchmark is done in parsing a > 20k atoms structure.
+
+![Bench v.s. legacy libAtoms](./extxyz/benches/result-vs-legacy-c.png)
+
+## Memory benchmark
+
+The rust implementation is memory safe, no memory leak validated by valgrind.
+
+On the contrary, `libAtoms/extxyz` has memory leak, manifested by:
+
+```
+valgrind --leak-check=full ./target/release/read_frame_legacy_c
+
+==1485786== 215,052 (24 direct, 215,028 indirect) bytes in 1 blocks are definitely lost in loss record 203 of 203
+==1485786==    at 0x48AB7A8: malloc (vg_replace_malloc.c:446)
+==1485786==    by 0x401D458: cleri_grammar (in /home/jyu/rust/extxyz-ng/target/release/read_frame_legacy_c)
+==1485786==    by 0x4017DDB: read_frame_legacy_c::main (in /home/jyu/rust/extxyz-ng/target/release/read_frame_legacy_c)
+==1485786==    by 0x4018F02: std::sys::backtrace::__rust_begin_short_backtrace (in /home/jyu/rust/extxyz-ng/target/release/read_frame_legacy_c)
+==1485786==    by 0x4018EF8: std::rt::lang_start::{{closure}} (in /home/jyu/rust/extxyz-ng/target/release/read_frame_legacy_c)
+==1485786==    by 0x402BCA5: std::rt::lang_start_internal (in /home/jyu/rust/extxyz-ng/target/release/read_frame_legacy_c)
+==1485786==    by 0x4018EE4: main (in /home/jyu/rust/extxyz-ng/target/release/read_frame_legacy_c)
+```
+
 ## Writer formatting
 
 - keys and values in the info line keeps its original format
