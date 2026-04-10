@@ -1183,6 +1183,26 @@ C           0.00000000       0.50000000       0.30000000
     }
 
     #[test]
+    fn test_parse_frame_numeric_start_str_in_arrs() {
+        let inp = r#"2
+Properties=species:S:1:pos:R:3:s:S:1 key1=aa key2=87 key3=thisisaverylongstring ZZPnonsense=65.9
+Mn 0.0 0.5 0.5 0000
+C 0.0 0.5 0.3 878X
+"#;
+
+        let mut rd = Cursor::new(inp.as_bytes());
+        let frame = read_frame(&mut rd).unwrap();
+        let frame = TFrame(frame);
+
+        let expect = r#"2
+ZZPnonsense=65.90000000 key1=aa key2=87 key3=thisisaverylongstring Properties=species:S:1:pos:R:3:s:S:1
+Mn          0.00000000       0.50000000       0.50000000 0000 
+C           0.00000000       0.50000000       0.30000000 878X 
+"#;
+        assert_eq!(format!("{frame}"), expect);
+    }
+
+    #[test]
     fn test_parse_frame_without_properties() {
         let inp = r#"2
 key1=aa key2=87 key3=thisisaverylongstring ZZPnonsense=65.9
@@ -1265,7 +1285,6 @@ C         -7.28250        4.71303       -3.82016
         let mut frames = vec![];
         for frame in read_frames(&mut rd) {
             let frame = frame.unwrap();
-            // dbg!(&frame);
             frames.push(frame);
         }
 
