@@ -7,11 +7,10 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::{
-        self,
         complete::{self, multispace0, space0, space1},
         streaming,
     },
-    combinator::{all_consuming, map, map_res, opt, recognize, verify},
+    combinator::{all_consuming, map, map_res, not, opt, peek, recognize, verify},
     multi::{many0, separated_list0, separated_list1},
     number,
     sequence::{delimited, separated_pair, terminated},
@@ -232,8 +231,16 @@ fn key_value(inp: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
     Ok((inp, (k, v)))
 }
 
+fn is_ident_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
 fn recognize_int(inp: &[u8]) -> IResult<&[u8], &[u8]> {
-    recognize(character::complete::i32).parse(inp)
+    terminated(
+        recognize(complete::i32),
+        peek(not(take_while1(is_ident_char))),
+    )
+    .parse(inp)
 }
 
 // i32
@@ -303,8 +310,8 @@ fn parse_bare_str(inp: &[u8]) -> IResult<&[u8], Value> {
 }
 
 fn recognize_bare_str(inp: &[u8]) -> IResult<&[u8], &[u8]> {
-    let (linp, s) = take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_').parse(inp)?;
-    if !s[0].is_ascii_alphabetic() && s[0] != b'_' {
+    let (linp, s) = take_while1(|c: u8| is_ident_char(c)).parse(inp)?;
+    if !s[0].is_ascii_alphanumeric() && s[0] != b'_' {
         return Err(nom::Err::Error(nom::error::Error::new(
             linp,
             nom::error::ErrorKind::Verify,
@@ -837,10 +844,11 @@ fn parse_xyz_by_lines<'a>(
             separated_list1(
                 space1,
                 alt((
-                    recognize_bare_str,
                     recognize_float,
                     recognize_int,
                     recognize_bool,
+                    // string is the least special element, so parsed in the end
+                    recognize_bare_str,
                 )),
             ),
             multispace0,
@@ -1183,6 +1191,26 @@ C           0.00000000       0.50000000       0.30000000
     }
 
     #[test]
+    fn test_parse_frame_numeric_start_str_in_arrs() {
+        let inp = r#"2
+Properties=species:S:1:pos:R:3:s:S:1 key1=aa key2=87 key3=thisisaverylongstring ZZPnonsense=65.9
+Mn 0.0 0.5 0.5 0000
+C 0.0 0.5 0.3 878X
+"#;
+
+        let mut rd = Cursor::new(inp.as_bytes());
+        let frame = read_frame(&mut rd).unwrap();
+        let frame = TFrame(frame);
+
+        let expect = r#"2
+ZZPnonsense=65.90000000 key1=aa key2=87 key3=thisisaverylongstring Properties=species:S:1:pos:R:3:s:S:1
+Mn          0.00000000       0.50000000       0.50000000 0000 
+C           0.00000000       0.50000000       0.30000000 878X 
+"#;
+        assert_eq!(format!("{frame}"), expect);
+    }
+
+    #[test]
     fn test_parse_frame_without_properties() {
         let inp = r#"2
 key1=aa key2=87 key3=thisisaverylongstring ZZPnonsense=65.9
@@ -1265,7 +1293,6 @@ C         -7.28250        4.71303       -3.82016
         let mut frames = vec![];
         for frame in read_frames(&mut rd) {
             let frame = frame.unwrap();
-            // dbg!(&frame);
             frames.push(frame);
         }
 
