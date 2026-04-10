@@ -83,25 +83,45 @@ where
     let mut maybe_natoms_line = String::new();
     rd.read_line(&mut maybe_natoms_line)?;
     if maybe_natoms_line.is_empty() {
-        // XXX: is this return None correct?
         return Ok(None);
     }
 
     // parse number of lines
     let natoms_line_as_bytes = maybe_natoms_line.as_bytes();
-    let (_, natoms) = parse_natoms(natoms_line_as_bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let (_, natoms) = parse_natoms(natoms_line_as_bytes).map_err(|e| {
+        let es = match e {
+            nom::Err::Incomplete(_) => "nom incomplete streaming".to_string(),
+            nom::Err::Error(err) | nom::Err::Failure(err) => {
+                format!(
+                    "{:?}: {}",
+                    err.code,
+                    str::from_utf8(err.input).unwrap_or("unrecognized u8 input")
+                )
+            }
+        };
+        io::Error::new(io::ErrorKind::InvalidData, es)
+    })?;
 
     let mut maybe_info_line = String::new();
     rd.read_line(&mut maybe_info_line)?;
     if maybe_info_line.is_empty() {
-        // XXX: is this return None correct?
         return Ok(None);
     }
 
     let info_line_as_bytes = maybe_info_line.as_bytes();
-    let (_, (info, prop_shape)) = parse_info(info_line_as_bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let (_, (info, prop_shape)) = parse_info(info_line_as_bytes).map_err(|e| {
+        let es = match e {
+            nom::Err::Incomplete(_) => "nom incomplete streaming".to_string(),
+            nom::Err::Error(err) | nom::Err::Failure(err) => {
+                format!(
+                    "{:?}: {}",
+                    err.code,
+                    str::from_utf8(err.input).unwrap_or("unrecognized u8 input")
+                )
+            }
+        };
+        io::Error::new(io::ErrorKind::InvalidData, es)
+    })?;
 
     // init the arrs from the shape, in order to avoid innermiddle allocation
     let mut arrs: Vec<(String, Value)> = prop_shape
@@ -131,24 +151,50 @@ where
         })
         .collect();
 
-    let mut buf = String::new();
-    let mut line = String::new();
-    for _ in 0..natoms {
-        line.clear();
-        let nbytes = rd.read_line(&mut line)?;
-        if nbytes == 0 {
+    let mut natoms_to_read = natoms;
+    // TODO: validate natoms and number of rows of the arr
+    loop {
+        let buf = rd.fill_buf()?;
+        if buf.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "EOF reached before reading full frame",
+                "EOF reached before parsing frame",
             ));
         }
-        buf.push_str(&line);
+
+        match parse_xyz_by_lines(buf, natoms_to_read, &prop_shape, &mut arrs) {
+            Ok((remain, nat)) => {
+                let len_read = buf.len() - remain.len();
+                rd.consume(len_read);
+
+                natoms_to_read -= nat;
+                if natoms_to_read == 0 {
+                    break;
+                } else if natoms_to_read > 0 {
+                    continue;
+                } else {
+                    // < 0
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "too many atoms than expected",
+                    ));
+                }
+            }
+            Err(e) => {
+                let es = match e {
+                    nom::Err::Incomplete(_) => "nom incomplete streaming".to_string(),
+                    nom::Err::Error(err) | nom::Err::Failure(err) => {
+                        format!(
+                            "{:?}: {}",
+                            err.code,
+                            str::from_utf8(err.input).unwrap_or("unrecognized u8 input")
+                        )
+                    }
+                };
+                return Err(io::Error::new(io::ErrorKind::InvalidData, es));
+            }
+        }
     }
-
-    let input = buf.as_bytes();
-
-    let (input, _) = parse_xyz_line_by_line(input, natoms, &prop_shape, &mut arrs)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
     let mut frame = Frame {
         natoms: natoms as u32,
@@ -156,44 +202,13 @@ where
         arrs: DictHandler(arrs),
     };
 
-    // any remain spaces
-    let (input, _) = multispace0::<_, nom::error::Error<&[u8]>>(input)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    debug_assert!(input.is_empty());
+    // // any remain spaces
+    // let (input, _) = multispace0::<_, nom::error::Error<&[u8]>>(input)
+    //     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
     if let Some(comment) = comment_override {
         frame.set_comment(comment);
     }
-
-    // loop {
-    //     let buf = rd.fill_buf()?;
-    //     if buf.is_empty() {
-    //         return Err(io::Error::new(
-    //             io::ErrorKind::UnexpectedEof,
-    //             "EOF reached before parsing frame",
-    //         ));
-    //     }
-    //
-    //     match parse_frame(buf) {
-    //         Ok((remaining, mut frame)) => {
-    //             let amount = buf.len() - remaining.len();
-    //             rd.consume(amount);
-    //             if let Some(comment) = comment_override {
-    //                 frame.set_comment(comment);
-    //             }
-    //
-    //             return Ok(frame);
-    //         }
-    //         Err(nom::Err::Incomplete(_needed)) => {
-    //             let len = buf.len();
-    //             rd.consume(len);
-    //
-    //             continue;
-    //         }
-    //         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
-    //     }
-    // }
 
     Ok(Some(frame))
 }
@@ -793,21 +808,29 @@ fn parse_natoms(input: &[u8]) -> IResult<&[u8], usize> {
     Ok((input, natoms))
 }
 
-fn parse_xyz_line_by_line<'a>(
-    mut input: &'a [u8],
-    natoms: usize,
+fn parse_xyz_by_lines<'a>(
+    input: &'a [u8],
+    natoms_to_read: usize,
     prop_shape: &Vec<(&'a str, Ty, u8)>,
     arrs: &mut [(String, Value)],
-) -> IResult<&'a [u8], ()> {
-    // TODO: validate natoms and number of rows of the arr
-
-    // create the data container first based on the shape
-    for _i in 0..natoms {
-        let (rest, line) = terminated(
+) -> IResult<&'a [u8], usize> {
+    let mut nat = 0;
+    let mut proc_input = input;
+    while !input.is_empty() && nat < natoms_to_read {
+        let res = terminated(
             nom::bytes::streaming::take_until(&b"\n"[..]),
-            opt(streaming::newline),
+            streaming::newline,
         )
-        .parse(input)?;
+        .parse(proc_input);
+
+        let (rest, line) = match res {
+            Ok((rest, line)) => (rest, line),
+            Err(nom::Err::Incomplete(_)) => {
+                return Ok((input, nat));
+            }
+            Err(err) => return Err(err),
+        };
+        proc_input = rest;
 
         let (_, mut vs_raw) = delimited(
             multispace0,
@@ -910,10 +933,10 @@ fn parse_xyz_line_by_line<'a>(
             }
         }
 
-        input = rest;
+        nat += 1;
     }
 
-    Ok((input, ()))
+    Ok((proc_input, nat))
 }
 
 #[cfg(test)]
@@ -1241,6 +1264,8 @@ C         -7.28250        4.71303       -3.82016
         let mut rd = Cursor::new(inp.as_bytes());
         let mut frames = vec![];
         for frame in read_frames(&mut rd) {
+            let frame = frame.unwrap();
+            // dbg!(&frame);
             frames.push(frame);
         }
 
