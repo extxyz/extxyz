@@ -8,8 +8,9 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["physics", "chemistry"]
 categories = ["external-ffi-bindings", "simulation"]
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 libc = "0.2.177"
@@ -19,3 +20,6 @@ extxyz-types = { path = "../extxyz-types" }
 cc = { version = "1.0", features = ["parallel"] }
 bindgen = "0.72.1"
 
+[[example]]
+name = "read_frame_legacy_c"
+path = "examples/read_frame_legacy_c.rs"

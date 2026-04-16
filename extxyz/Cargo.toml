@@ -1,26 +1,24 @@
 [package]
 name = "extxyz-ng"
 description = "extended XYZ parser (extxyz)"
-authors = ["Jusong Yu <jusong.yu@pm.me>"]
-repository = "https://github.com/extxyz/extxyz"
-readme = "README.md"
-license = "MIT OR Apache-2.0"
-keywords = ["physics", "chemistry"]
-categories = ["simulation"]
-version = "0.1.0"
-edition = "2021"
+readme = "../README.md"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "extxyz"
 
 [dependencies]
-extxyz-types = { path = "../extxyz-types" }
-nom = "8.0.0"
-
-[dependencies.extxyz-sys]
-path = "../extxyz-sys"
-optional = true
+extxyz-types = { workspace = true }
+nom = "8"
 
 [dev-dependencies]
 criterion = "0.5"
-extxyz-sys = { path = "../extxyz-sys" }
 
 [[bench]]
 name = "read_frame_alloc_vs_opt_alloc"
@@ -29,11 +27,3 @@ harness = false
 [[bench]]
 name = "read_frame_rs_vs_c"
 harness = false
-
-[features]
-legacy = ["extxyz-sys"]
-
-[[example]]
-name = "read_frame_legacy_c"
-path = "examples/read_frame_legacy_c.rs"
-required-features = ["legacy"]

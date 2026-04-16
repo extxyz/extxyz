@@ -1,4 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["extxyz-sys", "extxyz", "extxyz-types"]
+members = ["extxyz", "extxyz-types", "extxyz-sys"]
 
+[workspace.package]
+version = "0.0.1"
+authors = ["Jusong Yu <jusong.yu@pm.me>"]
+repository = "https://github.com/extxyz/extxyz"
+license = "MIT OR Apache-2.0"
+keywords = ["physics", "chemistry"]
+categories = ["simulation"]
+edition = "2021"
+
+[workspace.dependencies]
+extxyz-types = { path = "extxyz-types", version = "0.0.1" }
