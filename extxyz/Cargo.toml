@@ -13,9 +13,6 @@ edition.workspace = true
 [lib]
 name = "extxyz"
 
-[lib]
-name = "extxyz"
-
 [dependencies]
 extxyz-types = { workspace = true }
 nom = "8"
