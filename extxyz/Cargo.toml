@@ -3,12 +3,15 @@ name = "extxyz-ng"
 description = "extended XYZ parser (extxyz)"
 authors = ["Jusong Yu <jusong.yu@pm.me>"]
 repository = "https://github.com/extxyz/extxyz"
-readme = "README.md"
+readme = "../README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["physics", "chemistry"]
 categories = ["simulation"]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+
+[lib]
+name = "extxyz"
 
 [dependencies]
 extxyz-types = { path = "../extxyz-types" }
@@ -20,7 +23,6 @@ optional = true
 
 [dev-dependencies]
 criterion = "0.5"
-extxyz-sys = { path = "../extxyz-sys" }
 
 [[bench]]
 name = "read_frame_alloc_vs_opt_alloc"
