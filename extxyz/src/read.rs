@@ -130,19 +130,19 @@ where
                 (Ty::I, 1) => Value::VecInteger(Vec::with_capacity(natoms), natoms as u32),
                 (Ty::R, 1) => Value::VecFloat(Vec::with_capacity(natoms), natoms as u32),
                 (Ty::L, 1) => Value::VecBool(Vec::with_capacity(natoms), natoms as u32),
-                (Ty::S, 1) => Value::VecText(Vec::with_capacity(natoms), natoms as u32),
+                (Ty::S, 1) => Value::VecText(Box::new(Vec::with_capacity(natoms)), natoms as u32),
 
                 (Ty::I, nc) => {
-                    Value::MatrixInteger(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                    Value::MatrixInteger(Box::new(Vec::with_capacity(natoms)), (natoms as u32, *nc as u32))
                 }
                 (Ty::R, nc) => {
-                    Value::MatrixFloat(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                    Value::MatrixFloat(Box::new(Vec::with_capacity(natoms)), (natoms as u32, *nc as u32))
                 }
                 (Ty::L, nc) => {
-                    Value::MatrixBool(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                    Value::MatrixBool(Box::new(Vec::with_capacity(natoms)), (natoms as u32, *nc as u32))
                 }
                 (Ty::S, nc) => {
-                    Value::MatrixText(Vec::with_capacity(natoms), (natoms as u32, *nc as u32))
+                    Value::MatrixText(Box::new(Vec::with_capacity(natoms)), (natoms as u32, *nc as u32))
                 }
             };
 
@@ -404,7 +404,7 @@ fn parse_2d_arr_3x3_flatten(inp: &[u8]) -> IResult<&[u8], Value> {
             let row2 = vec![vals[1], vals[4], vals[7]];
             let row3 = vec![vals[2], vals[5], vals[8]];
             let vs = vec![row1, row2, row3];
-            Ok((inp, Value::MatrixInteger(vs, (3, 3))))
+            Ok((inp, Value::MatrixInteger(Box::new(vs), (3, 3))))
         }
         Value::Float(_) => {
             let vals = vals
@@ -415,7 +415,7 @@ fn parse_2d_arr_3x3_flatten(inp: &[u8]) -> IResult<&[u8], Value> {
             let row2 = vec![vals[1], vals[4], vals[7]];
             let row3 = vec![vals[2], vals[5], vals[8]];
             let vs = vec![row1, row2, row3];
-            Ok((inp, Value::MatrixFloat(vs, (3, 3))))
+            Ok((inp, Value::MatrixFloat(Box::new(vs), (3, 3))))
         }
         _ => Err(nom::Err::Failure(nom::error::Error::new(
             inp,
@@ -451,7 +451,7 @@ fn parse_2d_array(inp: &[u8]) -> IResult<&[u8], Value> {
                     i
                 })
                 .collect::<Vec<_>>();
-            Ok((inp_, Value::MatrixInteger(vs, (nr as u32, nc))))
+            Ok((inp_, Value::MatrixInteger(Box::new(vs), (nr as u32, nc))))
         }
         Value::VecFloat(_, nc) => {
             let nc = *nc;
@@ -466,7 +466,7 @@ fn parse_2d_array(inp: &[u8]) -> IResult<&[u8], Value> {
                     i
                 })
                 .collect::<Vec<_>>();
-            Ok((inp_, Value::MatrixFloat(vs, (nr as u32, nc))))
+            Ok((inp_, Value::MatrixFloat(Box::new(vs), (nr as u32, nc))))
         }
         Value::VecBool(_, nc) => {
             let nc = *nc;
@@ -481,7 +481,7 @@ fn parse_2d_array(inp: &[u8]) -> IResult<&[u8], Value> {
                     i
                 })
                 .collect::<Vec<_>>();
-            Ok((inp_, Value::MatrixBool(vs, (nr as u32, nc))))
+            Ok((inp_, Value::MatrixBool(Box::new(vs), (nr as u32, nc))))
         }
         Value::VecText(_, nc) => {
             let nc = *nc;
@@ -493,10 +493,10 @@ fn parse_2d_array(inp: &[u8]) -> IResult<&[u8], Value> {
                         unreachable!()
                     };
                     debug_assert_eq!(x, nc);
-                    i
+                    *i
                 })
                 .collect::<Vec<_>>();
-            Ok((inp_, Value::MatrixText(vs, (nr as u32, nc))))
+            Ok((inp_, Value::MatrixText(Box::new(vs), (nr as u32, nc))))
         }
         _ => unreachable!(),
     }
@@ -568,7 +568,7 @@ fn parse_1d_array(inp: &[u8]) -> IResult<&[u8], Value> {
                     i
                 })
                 .collect::<Vec<_>>();
-            Ok((inp_, Value::VecText(vs, n as u32)))
+            Ok((inp_, Value::VecText(Box::new(vs), n as u32)))
         }
         // safe unreachable: because all branches are ruled out in promote_values_1d call.
         _ => unreachable!(),
